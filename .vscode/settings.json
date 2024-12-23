@@ -1,0 +1,7 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "./Cargo.toml",
+        "sefs-cli/app/Cargo.toml",
+        "sefs-cli/enclave/Cargo.toml",
+    ],
+}
