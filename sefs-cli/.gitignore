@@ -2,5 +2,6 @@ target/
 bin/
 *Enclave_*
 enclave.so
+*.so
 libenclave.a
 libcompiler-rt-patch.a
