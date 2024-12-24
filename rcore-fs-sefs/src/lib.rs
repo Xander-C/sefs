@@ -67,7 +67,7 @@ pub struct INodeImpl {
     /// on-disk inode
     disk_inode: RwLock<Dirty<DiskINode>>,
     /// back file
-    file: Box<dyn File>,
+    file: RwLock<Box<dyn File>>,
     /// Reference to FS
     fs: Arc<SEFS>,
 }
@@ -88,7 +88,7 @@ impl INodeImpl {
     fn get_file_inode_and_entry_id(&self, name: &str) -> vfs::Result<(INodeId, usize)> {
         let name = if name.is_empty() { "." } else { name };
         for entry_id in 0..self.disk_inode.read().blocks as usize {
-            let entry = self.file.read_direntry(entry_id)?;
+            let entry = self.file.read().read_direntry(entry_id)?;
             if entry.name.as_ref() == name {
                 return Ok((entry.id as INodeId, entry_id));
             }
@@ -105,7 +105,7 @@ impl INodeImpl {
     fn get_entry_and_entry_id(&self, name: &str) -> vfs::Result<(DiskEntry, usize)> {
         let name = if name.is_empty() { "." } else { name };
         for entry_id in 0..self.disk_inode.read().blocks as usize {
-            let entry = self.file.read_direntry(entry_id)?;
+            let entry = self.file.read().read_direntry(entry_id)?;
             if entry.name.as_ref() == name {
                 return Ok((entry, entry_id));
             }
@@ -118,7 +118,7 @@ impl INodeImpl {
     fn dirent_init(&self, parent: INodeId) -> vfs::Result<()> {
         self.disk_inode.write().blocks = 2;
         // Insert entries: '.' '..'
-        self.file.write_direntry(
+        self.file.write().write_direntry(
             0,
             &DiskEntry {
                 id: self.id as u32,
@@ -126,7 +126,7 @@ impl INodeImpl {
                 type_: FileType::Dir,
             },
         )?;
-        self.file.write_direntry(
+        self.file.write().write_direntry(
             1,
             &DiskEntry {
                 id: parent as u32,
@@ -142,7 +142,7 @@ impl INodeImpl {
         let mut inode = self.disk_inode.write();
         let total = &mut inode.blocks;
         let entry_id = *total as usize;
-        self.file.write_direntry(entry_id, entry)?;
+        self.file.write().write_direntry(entry_id, entry)?;
         *total += 1;
         Ok(entry_id)
     }
@@ -151,11 +151,11 @@ impl INodeImpl {
     fn dirent_remove(&self, id: usize) -> vfs::Result<()> {
         let total = self.disk_inode.read().blocks as usize;
         debug_assert!(id < total);
-        let last_direntry = self.file.read_direntry(total - 1)?;
+        let last_direntry = self.file.read().read_direntry(total - 1)?;
         if id != total - 1 {
-            self.file.write_direntry(id, &last_direntry)?;
+            self.file.write().write_direntry(id, &last_direntry)?;
         }
-        self.file.set_len((total - 1) * DIRENT_SIZE)?;
+        self.file.write().set_len((total - 1) * DIRENT_SIZE)?;
         self.disk_inode.write().blocks -= 1;
         Ok(())
     }
@@ -184,7 +184,7 @@ impl INodeImpl {
     #[cfg(feature = "create_image")]
     pub fn update_mac(&self) -> vfs::Result<()> {
         if self.fs.device.protect_integrity() {
-            self.disk_inode.write().inode_mac = self.file.get_file_mac().unwrap();
+            self.disk_inode.write().inode_mac = self.file.read().get_file_mac().unwrap();
             //println!("file_mac {:?}", self.disk_inode.read().inode_mac);
             self.sync_all()?;
         }
@@ -195,7 +195,7 @@ impl INodeImpl {
     fn check_integrity(&self) {
         if self.fs.device.protect_integrity() {
             let inode_mac = &self.disk_inode.read().inode_mac;
-            let file_mac = self.file.get_file_mac().unwrap();
+            let file_mac = self.file.read().get_file_mac().unwrap();
             //info!("inode_mac {:?}, file_mac {:?}", inode_mac, file_mac);
             let not_integrity = inode_mac.0 != file_mac.0;
             assert!(!not_integrity, "FsError::NoIntegrity");
@@ -225,11 +225,11 @@ impl INodeImpl {
         } else {
             (range.start, range.len())
         };
-        self.file.write_zeros_at(offset, len).unwrap();
+        self.file.write().write_zeros_at(offset, len).unwrap();
 
         // May update file size
         if !keep_size && range.end > file_size {
-            self.file.set_len(range.end).unwrap();
+            self.file.write().set_len(range.end).unwrap();
             inode.size = range.end as u64;
         }
         Ok(())
@@ -264,10 +264,10 @@ impl INodeImpl {
         self.copy_range_to(&src_range, dst_offset)?;
 
         // Insert zeros
-        self.file.write_zeros_at(range.start, range.len()).unwrap();
+        self.file.write().write_zeros_at(range.start, range.len()).unwrap();
 
         // Update file size
-        self.file.set_len(new_file_size).unwrap();
+        self.file.write().set_len(new_file_size).unwrap();
         inode.size = new_file_size as u64;
         Ok(())
     }
@@ -296,7 +296,7 @@ impl INodeImpl {
 
         // Update file size
         let new_file_size = file_size - range.len();
-        self.file.set_len(new_file_size).unwrap();
+        self.file.write().set_len(new_file_size).unwrap();
         inode.size = new_file_size as u64;
         Ok(())
     }
@@ -326,10 +326,10 @@ impl INodeImpl {
         let mut buf: [u8; BLKSIZE] = unsafe { MaybeUninit::uninit().assume_init() };
         while remaining_size > 0 {
             let len = remaining_size.min(BLKSIZE);
-            self.file
+            self.file.read()
                 .read_exact_at(&mut buf[..len], src_offset as usize)
                 .unwrap();
-            self.file
+            self.file.write()
                 .write_all_at(&buf[..len], dst_offset as usize)
                 .unwrap();
             remaining_size -= len;
@@ -352,7 +352,7 @@ impl vfs::INode for INodeImpl {
             let end = size.min(offset.saturating_add(buf.len()));
             end - start
         };
-        let real_len = self.file.read_at(buf, offset)?;
+        let real_len = self.file.read().read_at(buf, offset)?;
         if real_len < len {
             for item in buf.iter_mut().skip(real_len).take(len - real_len) {
                 *item = 0;
@@ -366,11 +366,11 @@ impl vfs::INode for INodeImpl {
         if type_ != FileType::File && type_ != FileType::SymLink && type_ != FileType::Socket {
             return Err(FsError::NotFile);
         }
-        let len = self.file.write_at(buf, offset)?;
+        let len = self.file.write().write_at(buf, offset)?;
         let end_offset = offset + len;
         let mut inode = self.disk_inode.write();
         if end_offset > inode.size as usize {
-            self.file.set_len(end_offset)?;
+            self.file.write().set_len(end_offset)?;
             inode.size = end_offset as u64;
         }
         Ok(len)
@@ -422,7 +422,7 @@ impl vfs::INode for INodeImpl {
     }
 
     fn sync_data(&self) -> vfs::Result<()> {
-        self.file.flush()?;
+        self.file.write().flush()?;
         Ok(())
     }
 
@@ -471,7 +471,7 @@ impl vfs::INode for INodeImpl {
                     let mut inode = self.disk_inode.write();
                     let file_size = inode.size as usize;
                     if range.end > file_size {
-                        self.file.set_len(range.end).unwrap();
+                        self.file.write().set_len(range.end).unwrap();
                         inode.size = range.end as u64;
                     }
                 }
@@ -486,7 +486,7 @@ impl vfs::INode for INodeImpl {
             return Err(FsError::NotFile);
         }
         let mut inode = self.disk_inode.write();
-        self.file.set_len(len)?;
+        self.file.write().set_len(len)?;
         inode.size = len as u64;
         Ok(())
     }
@@ -691,12 +691,12 @@ impl vfs::INode for INodeImpl {
                 name: Str256::from(new_name),
                 type_: old_entry.type_,
             };
-            self.file.write_direntry(entry_id, &entry)?;
+            self.file.write().write_direntry(entry_id, &entry)?;
             // Replace the existing inode
             if let Some((replace_inode, replace_entry_id)) = to_be_replaced_inode_info {
                 if let Err(e) = self.dirent_inode_remove(replace_inode, replace_entry_id) {
                     // Recover if fail
-                    self.file.write_direntry(entry_id, &old_entry)?;
+                    self.file.write().write_direntry(entry_id, &old_entry)?;
                     return Err(e);
                 }
             }
@@ -756,7 +756,7 @@ impl vfs::INode for INodeImpl {
         if id >= self.disk_inode.read().blocks as usize {
             return Err(FsError::EntryNotFound);
         };
-        let entry = self.file.read_direntry(id)?;
+        let entry = self.file.read().read_direntry(id)?;
         Ok(String::from(entry.name.as_ref()))
     }
 
@@ -766,7 +766,7 @@ impl vfs::INode for INodeImpl {
         }
         let idx = ctx.pos();
         for entry_id in idx..self.disk_inode.read().blocks as usize {
-            let entry = self.file.read_direntry(entry_id)?;
+            let entry = self.file.read().read_direntry(entry_id)?;
             if let Err(e) = ctx.write_entry(
                 entry.name.as_ref(),
                 entry.id as u64,
@@ -1039,8 +1039,8 @@ impl SEFS {
             id,
             disk_inode: RwLock::new(disk_inode),
             file: match create {
-                true => self.device.create(filename.as_str())?,
-                false => self.device.open(filename.as_str())?,
+                true => RwLock::new(self.device.create(filename.as_str())?),
+                false => RwLock::new(self.device.open(filename.as_str())?),
             },
             fs: self.self_ptr.upgrade().unwrap(),
         });
