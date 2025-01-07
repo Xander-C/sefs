@@ -6,6 +6,7 @@ use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ctrlc;
 use libc;
@@ -157,6 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             mac,
             key,
         } => {
+            let start = Instant::now();
             std::fs::create_dir(&image)?;
             let key = parse_key(&key)?;
             let mode = sgx_dev::EncryptMode::from_parameters(true, &key)?;
@@ -180,7 +182,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             let f = std::fs::File::create(mac)?;
             f.write_all_at(root_mac_str.as_bytes(), 0)?;
-            println!("Generate the SEFS image successfully");
+            let duration = start.elapsed();
+            println!("Generate the SEFS image successfully {:?}", duration);
         }
         Cmd::Unzip {
             image,
